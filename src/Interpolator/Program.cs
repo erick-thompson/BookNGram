@@ -4,15 +4,13 @@ using System.Collections.Generic;
 using System.Configuration;
 using System.Data.SqlClient;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 
 namespace Interpolator
 {
     class Program
     {
-
-        static readonly ConcurrentBag<Tuple<long,long>> _NewValues = new ConcurrentBag<Tuple<long, long>>();
-
         static void Main(string[] args)
         {
             var connStr = ConfigurationManager.ConnectionStrings[args[0]].ConnectionString;
@@ -25,7 +23,13 @@ namespace Interpolator
 
             var keyQueue = new Queue<Tuple<long,long>>(windowSize);
             var currentPosition = Int64.MinValue;
-            using (var command = new SqlCommand(string.Format("SELECT {0},{1} FROM {2}", xColumn, yColumn, tableName), new SqlConnection(connStr)))
+            var linearData = "linearData.txt";
+            if (File.Exists(linearData))
+                File.Delete(linearData);
+
+            File.AppendAllText(linearData, "x_start\tx_end\tr_squared\ty_intercept\tslope\r\n");
+
+            using (var command = new SqlCommand(string.Format("SELECT [{0}],[{1}] FROM [{2}]", xColumn, yColumn, tableName), new SqlConnection(connStr)))
             {
                 command.Connection.Open();
                 using (var reader = command.ExecuteReader())
@@ -36,21 +40,22 @@ namespace Interpolator
                         var newDataValue = reader.GetInt64(1);
                         keyQueue.Enqueue(Tuple.Create(newKeyValue, newDataValue));
 
-                        if (currentPosition == Int64.MinValue)
-                        {
-                            currentPosition = newKeyValue;
-                        }
-                        else
-                        {
-                            while (currentPosition != newKeyValue)
-                            {
-                                _Interpolate(keyQueue, currentPosition);
-                                currentPosition++;
-                            }
-                        }
+                        var window = keyQueue.ToArray();
 
+                        var start = window[0].Item1;
+                        var end = window.Last().Item1;
+
+                        if (end - start > 10)
+                        {
+                            double rsquared;
+                            double ylongercept;
+                            double slope;
+                            LinearRegression(window.Select(x => Convert.ToDouble(x.Item1)).ToArray(), window.Select(y => Convert.ToDouble(y.Item2)).ToArray(), out rsquared, out ylongercept, out slope);
+                            File.AppendAllText(linearData,
+                                               string.Format("{0}\t{1}\t{2}\t{3}\t{4}\r\n", start, end, rsquared,
+                                                             ylongercept, slope));
+                        }
                         currentPosition++;
-
                         if (keyQueue.Count < windowSize)
                             continue;
                         
@@ -60,43 +65,22 @@ namespace Interpolator
                 command.Connection.Close();
             }
 
-            var finalNewValues = _NewValues
-                .GroupBy(x => x.Item1)
-                .Select(x => new
-                                 {
-                                     XValue = x.Key, 
-                                     Estimate = Convert.ToInt64(Math.Round(x.Average(a => a.Item2)))
-                                 }).OrderBy(x => x.XValue).ToArray();
+            Console.WriteLine("done ");
+            Console.ReadLine();
+            //foreach (var finalNewValue in finalNewValues)
+            //{
+            //    using (var conn = new SqlConnection(connStr))
+            //    {
+            //        var commandString = string.Format("INSERT INTO [{0} ([{1}],[{2}]) VALUES ({3},{4})",tableName, xColumn, yColumn, finalNewValue.XValue, finalNewValue.Estimate);
+            //        conn.Open();
+            //        using (var cmd = new SqlCommand(commandString, conn))
+            //        {
+            //            cmd.ExecuteNonQuery();
+            //        }
+            //        conn.Close();
+            //    }
+            //}
 
-            foreach (var finalNewValue in finalNewValues)
-            {
-                using (var conn = new SqlConnection(connStr))
-                {
-                    var commandString = string.Format("INSERT INTO [{0} ([{1}],[{2}]) VALUES ({3},{4})",tableName, xColumn, yColumn, finalNewValue.XValue, finalNewValue.Estimate);
-                    conn.Open();
-                    using (var cmd = new SqlCommand(commandString, conn))
-                    {
-                        cmd.ExecuteNonQuery();
-                    }
-                    conn.Close();
-                }
-            }
-            
-        }
-
-        private static void _Interpolate(Queue<Tuple<long, long>> keyQueue, long missingX)
-        {
-            var window = keyQueue.ToArray();
-
-            double rsquared;
-            double ylongercept;
-            double slope;
-            LinearRegression(window.Select(x => Convert.ToDouble(x.Item1)).ToArray(), window.Select(y => Convert.ToDouble(y.Item2)).ToArray(), out rsquared, out ylongercept, out slope);
-
-            var missingEstimate = Convert.ToInt64(Math.Round((missingX * slope) + ylongercept));
-
-            var newTuple = Tuple.Create(missingX, missingEstimate);
-            _NewValues.Add(newTuple);
         }
 
         /// <summary>
