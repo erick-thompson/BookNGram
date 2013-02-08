@@ -16,28 +16,47 @@ namespace Interpolator
             var connStr = ConfigurationManager.ConnectionStrings[args[0]].ConnectionString;
             var xColumn = args[1];
             var yColumn = args[2];
-            var tableName = args[3];
+            var discriminatorColumn = args[3];
+            var tableName = args[4];
             
             const int windowSize = 27;
             Debug.Assert(windowSize % 2 == 1, "window size must be odd");
 
-            var keyQueue = new Queue<Tuple<long,long>>(windowSize);
-            var currentPosition = Int64.MinValue;
-            var linearData = "linearData.txt";
-            if (File.Exists(linearData))
-                File.Delete(linearData);
+            var keyQueue = default(Queue<Tuple<long, long>>);
+            var linearDataFile = "linearData.txt";
+            if (File.Exists(linearDataFile))
+                File.Delete(linearDataFile);
 
-            File.AppendAllText(linearData, "x_start\tx_end\tr_squared\ty_intercept\tslope\r\n");
+            var counts = new Dictionary<int, Int64>();
 
-            using (var command = new SqlCommand(string.Format("SELECT [{0}],[{1}] FROM [{2}]", xColumn, yColumn, tableName), new SqlConnection(connStr)))
+            var currentDiscriminator = Int32.MinValue;
+
+            var cmdText = string.Format("SELECT [{0}],[{1}],[{2}] FROM [{3}] ORDER BY {2}", xColumn, yColumn, discriminatorColumn, tableName);
+            using (var command = new SqlCommand(cmdText, new SqlConnection(connStr)))
             {
                 command.Connection.Open();
                 using (var reader = command.ExecuteReader())
                 {
                     while (reader.Read())
                     {
+                        var newDiscriminatorValue = reader.GetInt32(2);
+                        if (newDiscriminatorValue != currentDiscriminator)
+                        {
+                            keyQueue = new Queue<Tuple<long, long>>(windowSize);
+                            Console.WriteLine("New discriminator value {0}", newDiscriminatorValue);
+                            currentDiscriminator = newDiscriminatorValue;
+                            linearDataFile = string.Format("linearData_set{0}.txt", newDiscriminatorValue);
+                            if (File.Exists(linearDataFile))
+                            {
+                                File.Delete(linearDataFile);
+                                File.AppendAllText(linearDataFile, "x_start\tx_end\tr_squared\ty_intercept\tslope\r\n");
+                            }
+                            counts.Add(newDiscriminatorValue, 0);
+                        }
+
                         var newKeyValue = reader.GetInt64(0);
                         var newDataValue = reader.GetInt64(1);
+
                         keyQueue.Enqueue(Tuple.Create(newKeyValue, newDataValue));
 
                         var window = keyQueue.ToArray();
@@ -51,11 +70,12 @@ namespace Interpolator
                             double ylongercept;
                             double slope;
                             LinearRegression(window.Select(x => Convert.ToDouble(x.Item1)).ToArray(), window.Select(y => Convert.ToDouble(y.Item2)).ToArray(), out rsquared, out ylongercept, out slope);
-                            File.AppendAllText(linearData,
+                            File.AppendAllText(linearDataFile,
                                                string.Format("{0}\t{1}\t{2}\t{3}\t{4}\r\n", start, end, rsquared,
                                                              ylongercept, slope));
                         }
-                        currentPosition++;
+
+                        counts[newDiscriminatorValue]++;
                         if (keyQueue.Count < windowSize)
                             continue;
                         
